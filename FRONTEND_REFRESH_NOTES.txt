@@ -1,0 +1,31 @@
+ONCONNECT PROFESSIONAL FRONTEND REFRESH
+
+What changed
+- Refreshed the Vite/TypeScript frontend visual system with an indigo/violet brand palette.
+- Updated navigation, search, sidebar, page layout, cards, feed posts, community headers, buttons, forms, dialogs and responsive breakpoints.
+- Improved focus, hover, reduced-motion and mobile presentation styles.
+- Updated page title and browser theme metadata.
+- Preserved the existing TypeScript app, routes, Django API integration, authentication, profile editing, community/post interactions, and appearance controls.
+
+Compatibility
+- No Django API endpoints, database models, or migrations were changed for this visual refresh.
+- No database schema changes are required.
+- Existing media and SQLite file are retained in the project archive.
+
+Run frontend
+  cd frontend
+  npm ci
+  npm run build
+  npm run dev
+
+Run Django using the existing README instructions.
+
+Security note
+- backend/.env is intentionally not included in this refreshed archive because it can contain local secrets and database passwords.
+- Create backend/.env from backend/.env.example and enter your own local settings.
+- Never share backend/.env or commit it to source control.
+
+Validation
+- TypeScript compiler check (`tsc --noEmit`) passed in the available environment.
+- Python syntax parsing passed for 52 Python files.
+- A full Vite production build could not be run here because dependency installation timed out; run `npm ci` and `npm run build` on your machine.
