@@ -23,7 +23,7 @@ INSTALLED_APPS = [
     "core",
     "communities",
     "social",
-    'django_extensions',
+    "connections",
 ]
 
 MIDDLEWARE = [
@@ -97,4 +97,8 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    # Used by the chat endpoint (ScopedRateThrottle) so one account cannot flood it.
+    "DEFAULT_THROTTLE_RATES": {
+        "chat": "180/min",
+    },
 }

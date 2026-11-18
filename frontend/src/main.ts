@@ -1,14 +1,23 @@
 import "./style.css";
+import "./upgrade.css";
 import {
   type Branding,
+  type ChatData,
+  type ChatMessage,
   type Comment,
   type CommentNode,
   type Community,
+  type ConnectionsData,
+  type Conversation,
+  type Person,
   type Post,
   type Route,
   type Sort,
+  type Summary,
   type User,
   buildCommentTree,
+  chatTime,
+  dayLabel,
   countDescendants,
   escapeHTML,
   formatCount,
@@ -22,20 +31,15 @@ import {
   timeAgo,
 } from "./utils";
 
-/* ------------------------------------------------------------------ *
- *  Settings you may want to tweak
- * ------------------------------------------------------------------ */
 
-const COMMUNITY_PREFIX = "r/"; // change to "c/" if you prefer your own naming
-const USER_PREFIX = "u/";
+
+const COMMUNITY_PREFIX = "a/"; 
+const USER_PREFIX = "c/";
 const MAX_IMAGES = 10;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MOD_ROLES = ["owner", "admin", "moderator"];
 
-/* ------------------------------------------------------------------ *
- *  State
- * ------------------------------------------------------------------ */
 
 type ListResponse<T> = T[] | { results?: T[] };
 
@@ -68,9 +72,23 @@ const state = {
   pending: new Set<string>(),
   submitKind: "text" as "text" | "link",
   submitFiles: [] as File[],
+
+
+  people: [] as Person[],
+  peopleTab: "discover" as "discover" | "requests" | "connections",
+  peopleQuery: "",
+  network: { connections: [], incoming: [], outgoing: [] } as ConnectionsData,
+  conversations: [] as Conversation[],
+  chat: null as ChatData | null,
+  profile: null as Person | null,
+  summary: { unread_messages: 0, pending_requests: 0, latest: null } as Summary,
 };
 
 let navToken = 0;
+let chatTimer = 0;
+let lastAlertId = 0;
+let soundOn = loadSound();
+let audioCtx: AudioContext | null = null;
 
 /* ------------------------------------------------------------------ *
  *  API helper
@@ -169,10 +187,22 @@ const ICONS: Record<string, string> = {
   camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/>',
   check: '<path d="m5 12 5 5 9-10"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  message: '<path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 4V6a1 1 0 0 1 1-1z"/>',
+  userPlus: '<circle cx="9.5" cy="8" r="4"/><path d="M2 21v-1a6 6 0 0 1 6-6h3"/><path d="M18 8v6M15 11h6"/>',
+  userCheck: '<circle cx="9.5" cy="8" r="4"/><path d="M2 21v-1a6 6 0 0 1 6-6h3"/><path d="m15 17 2.5 2.5L22 14"/>',
+  send: '<path d="M21 3 10 14"/><path d="m21 3-7 18-4-7-7-4z"/>',
+  volume: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  volumeOff: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6M22 9l-5 6"/>',
 };
 
 function icon(name: string, extraClass = ""): string {
   return `<svg class="icon ${extraClass}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;
+}
+
+/** Small count bubble. Always rendered so it can be updated in place without re-drawing the page. */
+function badge(count: number, kind: "messages" | "requests"): string {
+  const text = count > 99 ? "99+" : String(count);
+  return `<span class="badge-dot${count > 0 ? "" : " hidden"}" data-badge="${kind}">${text}</span>`;
 }
 
 type Mode = "light" | "dark" | "system";
@@ -205,10 +235,10 @@ function loadPrefs(): Prefs {
       };
     }
   } catch {
-    /* ignore corrupted storage */
+   
   }
 
-  const legacy = localStorage.getItem("onconnect-theme"); // older versions
+  const legacy = localStorage.getItem("onconnect-theme"); 
   return { ...DEFAULT_PREFS, mode: legacy === "dark" || legacy === "light" ? legacy : "system" };
 }
 
@@ -358,6 +388,13 @@ function renderNav(): void {
     </form>
 
     <div class="nav-actions">
+      ${
+        user
+          ? `
+      <a class="icon-btn has-badge" href="#/people" aria-label="People and connection requests" title="People">${icon("users")}${badge(state.summary.pending_requests, "requests")}</a>
+      <a class="icon-btn has-badge" href="#/messages" aria-label="Messages" title="Messages">${icon("message")}${badge(state.summary.unread_messages, "messages")}</a>`
+          : ""
+      }
       <button class="icon-btn" data-action="toggle-theme" aria-label="Switch light/dark mode" title="Light / dark">
         ${icon(currentTheme() === "dark" ? "sun" : "moon")}
       </button>
@@ -392,8 +429,8 @@ function renderLeft(): void {
   if (!left) return;
 
   const route = state.route;
-  const navItem = (href: string, label: string, iconName: string, active: boolean) =>
-    `<a class="side-item ${active ? "active" : ""}" href="${href}">${icon(iconName)}<span>${label}</span></a>`;
+  const navItem = (href: string, label: string, iconName: string, active: boolean, extra = "") =>
+    `<a class="side-item ${active ? "active" : ""}" href="${href}">${icon(iconName)}<span>${label}</span>${extra}</a>`;
 
   const communityItem = (c: Community) => `
     <a class="side-item side-community ${route.name === "community" && route.slug === c.slug ? "active" : ""}"
@@ -410,6 +447,12 @@ function renderLeft(): void {
       ${navItem("#/", "Home", "home", route.name === "home")}
       ${navItem("#/popular", "Popular", "flame", route.name === "popular")}
       ${navItem("#/communities", "Explore", "compass", route.name === "communities")}
+      ${
+        state.user
+          ? navItem("#/people", "People", "users", route.name === "people", badge(state.summary.pending_requests, "requests")) +
+            navItem("#/messages", "Messages", "message", route.name === "messages", badge(state.summary.unread_messages, "messages"))
+          : ""
+      }
     </nav>
 
     <nav class="side-section">
@@ -701,7 +744,8 @@ function feedPage(): string {
         `<a class="btn btn-primary" href="${createHref()}">Create Post</a><a class="btn btn-outline" href="#/communities">Explore communities</a>`,
       );
 
-  const main = `${title}${createPostBar()}${sortBar()}<div class="post-list">${posts}</div>`;
+  const hero = route.name === "home" ? heroCard() : "";
+  const main = `${hero}${title}${createPostBar()}${sortBar()}<div class="post-list">${posts}</div>`;
   const rail = isCommunity && community ? communityRail(community) : homeRail();
 
   return `${banner}${layout(main, rail)}`;
@@ -890,7 +934,18 @@ function userPage(): string {
 
   const username = route.username;
   const isMe = state.user?.username.toLowerCase() === username.toLowerCase();
-  const displayName = isMe && state.user ? userName(state.user) : state.feed[0]?.author_name || username;
+  const person = state.profile;
+  const displayName =
+    isMe && state.user ? userName(state.user) : person?.display_name || state.feed[0]?.author_name || username;
+  const bio = isMe ? state.user?.bio : person?.bio;
+  const avatarUrl = isMe ? state.user?.avatar_url : person?.avatar_url || state.feed[0]?.author_avatar;
+  const profileActions = isMe
+    ? `<button class="btn btn-outline" data-action="edit-profile">${icon("camera")} Edit profile</button>`
+    : person
+      ? `<div class="person-actions">${personActions(person)}</div>`
+      : !state.user
+        ? `<button class="btn btn-brand" data-action="open-login">Log in to connect</button>`
+        : "";
   const karma = state.feed.reduce((sum, post) => sum + (post.score || 0), 0);
 
   const posts = state.feed.length
@@ -898,14 +953,15 @@ function userPage(): string {
     : emptyState(isMe ? "You haven't posted yet" : `${USER_PREFIX}${username} hasn't posted yet`, "Posts will show up here.");
 
   const main = `
-    <section class="card profile-head">
-      ${userAvatar(displayName, "lg", isMe ? state.user?.avatar_url : state.feed[0]?.author_avatar)}
+    <section class="card profile-head cover" style="--hue:${hueFor(username)}">
+      <span class="avatar-ring big">${userAvatar(displayName, "lg", avatarUrl)}</span>
       <div class="profile-info">
         <h1>${escapeHTML(displayName)}</h1>
         <span class="muted">${USER_PREFIX}${escapeHTML(username)}</span>
-        ${isMe && state.user?.bio ? `<p class="profile-bio">${escapeHTML(state.user.bio)}</p>` : ""}
+        ${bio ? `<p class="profile-bio">${escapeHTML(bio)}</p>` : ""}
+        ${person && person.shared_communities ? `<span class="chip">${icon("users", "inline")} ${plural(person.shared_communities, "shared community", "shared communities")}</span>` : ""}
       </div>
-      ${isMe ? `<button class="btn btn-outline" data-action="edit-profile">${icon("camera")} Edit profile</button>` : ""}
+      <div class="profile-actions">${profileActions}</div>
     </section>
     <div class="page-heading slim"><div><h2>Posts</h2></div></div>
     <div class="post-list">${posts}</div>`;
@@ -917,6 +973,7 @@ function userPage(): string {
         <div class="stat-row">
           <div><strong>${formatCount(state.feed.length)}</strong><small>Posts</small></div>
           <div><strong>${formatCount(karma)}</strong><small>Post score</small></div>
+          ${person ? `<div><strong>${formatCount(person.connection_count ?? 0)}</strong><small>Connections</small></div>` : ""}
         </div>
         ${isMe ? `<a class="btn btn-primary btn-block" href="#/submit">Create Post</a>` : ""}
       </div>
@@ -1093,6 +1150,10 @@ function pageHTML(): string {
       return submitPage();
     case "settings":
       return settingsPage();
+    case "people":
+      return peoplePage();
+    case "messages":
+      return messagesPage();
     default:
       return errorPage("That page doesn’t exist.");
   }
@@ -1123,6 +1184,8 @@ function updateTitle(): void {
     case "search": title = route.q ? `${route.q} — ${site}` : `Search — ${site}`; break;
     case "user": title = `${USER_PREFIX}${route.username} — ${site}`; break;
     case "settings": title = `Brand settings — ${site}`; break;
+    case "people": title = `People — ${site}`; break;
+    case "messages": title = `Messages — ${site}`; break;
     default: title = `${site} — ${state.branding.tagline}`;
   }
 
@@ -1160,7 +1223,7 @@ async function loadCommunities(): Promise<void> {
   try {
     state.communities = listOf(await api<ListResponse<Community>>("/api/communities/"));
   } catch {
-    /* keep whatever we had */
+    
   }
 }
 
@@ -1169,7 +1232,7 @@ async function loadBranding(): Promise<void> {
     state.branding = { ...state.branding, ...(await api<Branding>("/api/branding/")) };
     applyBranding();
   } catch {
-    /* defaults are fine */
+  
   }
 }
 
@@ -1201,9 +1264,11 @@ async function navigate(options: { keepScroll?: boolean } = {}): Promise<void> {
   state.route = route;
   state.error = "";
   state.replyTo = null;
+  state.profile = null;
+  stopChatPolling();
   document.body.classList.remove("drawer-open");
 
-  const needsData = ["home", "popular", "community", "post", "search", "user"].includes(route.name);
+  const needsData = ["home", "popular", "community", "post", "search", "user", "people", "messages"].includes(route.name);
   state.loading = needsData;
 
   if (route.name === "submit") {
@@ -1217,7 +1282,7 @@ async function navigate(options: { keepScroll?: boolean } = {}): Promise<void> {
   updateTitle();
   renderPage();
 
-  /* pages that render immediately but still want fresh membership data */
+ 
   if (!needsData) {
     if (["submit", "communities"].includes(route.name)) {
       await loadCommunities();
@@ -1282,6 +1347,46 @@ async function navigate(options: { keepScroll?: boolean } = {}): Promise<void> {
           all.filter((post) => post.username.toLowerCase() === wanted),
           "new",
         );
+
+        if (state.user) {
+          try {
+            const person = await api<Person>(`/api/people/${encodeURIComponent(route.username)}/`);
+            if (token !== navToken) return;
+            state.profile = person;
+          } catch {
+            state.profile = null;
+          }
+        }
+        break;
+      }
+      case "people": {
+        if (!state.user) break;
+        const search = state.peopleQuery ? `?search=${encodeURIComponent(state.peopleQuery)}` : "";
+        const [people, network] = await Promise.all([
+          api<Person[]>(`/api/people/${search}`),
+          api<ConnectionsData>("/api/connections/"),
+        ]);
+        if (token !== navToken) return;
+        state.people = people;
+        state.network = network;
+        break;
+      }
+      case "messages": {
+        if (!state.user) break;
+        const [conversations, network] = await Promise.all([
+          api<Conversation[]>("/api/messages/"),
+          api<ConnectionsData>("/api/connections/"),
+        ]);
+        if (token !== navToken) return;
+        state.conversations = conversations;
+        state.network = network;
+        state.chat = null;
+
+        if (route.username) {
+          const chat = await api<ChatData>(`/api/messages/with/${encodeURIComponent(route.username)}/`);
+          if (token !== navToken) return;
+          state.chat = chat;
+        }
         break;
       }
     }
@@ -1296,11 +1401,546 @@ async function navigate(options: { keepScroll?: boolean } = {}): Promise<void> {
   updateTitle();
   renderLeft();
   renderPage();
+
+  if (route.name === "messages" && state.chat) {
+    scrollChat(true);
+    startChatPolling();
+  }
+  void refreshSummary();
 }
 
 /* ------------------------------------------------------------------ *
- *  Modals
+ *  People, connections and chat
  * ------------------------------------------------------------------ */
+
+function loadSound(): boolean {
+  try {
+    return localStorage.getItem("onconnect-sound") !== "off";
+  } catch {
+    return true;
+  }
+}
+
+/** A short two-note chime made with the Web Audio API, so no sound file is needed. */
+function playPing(): void {
+  if (!soundOn) return;
+  try {
+    audioCtx = audioCtx ?? new AudioContext();
+    const ctx = audioCtx;
+    if (ctx.state === "suspended") void ctx.resume();
+
+    const start = ctx.currentTime;
+    const tone = (frequency: number, delay: number, length: number) => {
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start + delay);
+      gain.gain.exponentialRampToValueAtTime(0.16, start + delay + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + delay + length);
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.start(start + delay);
+      oscillator.stop(start + delay + length + 0.05);
+    };
+    tone(880, 0, 0.16);
+    tone(1318.5, 0.12, 0.24);
+  } catch {
+   
+  }
+}
+
+function setBadge(kind: "messages" | "requests", count: number): void {
+  document.querySelectorAll<HTMLElement>(`[data-badge="${kind}"]`).forEach((element) => {
+    element.textContent = count > 99 ? "99+" : String(count);
+    element.classList.toggle("hidden", count <= 0);
+  });
+}
+
+async function refreshSummary(): Promise<void> {
+  if (!state.user) return;
+
+  try {
+    const next = await api<Summary>("/api/notifications/summary/");
+    if (!state.user) return;
+
+    const previous = state.summary;
+    state.summary = next;
+    setBadge("messages", next.unread_messages);
+    setBadge("requests", next.pending_requests);
+
+    const route = state.route;
+    const chattingWith = route.name === "messages" ? route.username?.toLowerCase() : undefined;
+
+    if (next.latest && next.latest.id > lastAlertId) {
+      const firstCheck = lastAlertId === 0; // messages that were already waiting are not announced
+      lastAlertId = next.latest.id;
+      if (!firstCheck && next.latest.username.toLowerCase() !== chattingWith) {
+        playPing();
+        toast(`New message from ${next.latest.display_name}`);
+      }
+    }
+
+    if (route.name === "messages" && previous.unread_messages !== next.unread_messages) {
+      void refreshConversations();
+    }
+  } catch {
+
+  }
+}
+
+/* ------------------------------- people --------------------------------- */
+
+function personActions(person: Person): string {
+  switch (person.connection_status) {
+    case "none":
+      return `<button class="btn btn-brand btn-sm" data-action="connect" data-id="${person.id}">${icon("userPlus")} Connect</button>`;
+    case "pending_sent":
+      return `<button class="btn btn-outline btn-sm joined" data-action="cancel-request" data-id="${person.connection_id}" title="Cancel request">
+        <span class="when-idle">${icon("check")} Request sent</span><span class="when-hover">Cancel</span></button>`;
+    case "pending_received":
+      return `<button class="btn btn-brand btn-sm" data-action="accept-request" data-id="${person.connection_id}">${icon("check")} Accept</button>
+        <button class="btn btn-outline btn-sm" data-action="decline-request" data-id="${person.connection_id}">Decline</button>`;
+    case "connected":
+      return `<a class="btn btn-brand btn-sm" href="#/messages/${encodeURIComponent(person.username)}">${icon("message")} Message</a>
+        <button class="btn btn-outline btn-sm" data-action="disconnect" data-id="${person.connection_id}" aria-label="Remove connection" title="Remove connection">${icon("x")}</button>`;
+    default:
+      return "";
+  }
+}
+
+function personCard(person: Person): string {
+  const name = person.display_name || person.username;
+  return `
+    <article class="person-card" style="--hue:${hueFor(person.username)}">
+      <div class="person-cover"></div>
+      <a class="person-top" href="#/u/${encodeURIComponent(person.username)}">
+        <span class="avatar-ring">${userAvatar(name, "lg", person.avatar_url)}</span>
+        <strong>${escapeHTML(name)}</strong>
+        <small class="muted">${USER_PREFIX}${escapeHTML(person.username)}</small>
+      </a>
+      <p class="person-bio">${person.bio ? escapeHTML(person.bio) : `<span class="muted">No bio yet.</span>`}</p>
+      ${
+        person.shared_communities
+          ? `<span class="chip">${icon("users", "inline")} ${plural(person.shared_communities, "shared community", "shared communities")}</span>`
+          : ""
+      }
+      <div class="person-actions">${personActions(person)}</div>
+    </article>`;
+}
+
+function signInPrompt(title: string, text: string): string {
+  return emptyState(
+    title,
+    text,
+    `<button class="btn btn-brand" data-action="open-login">Log In</button><button class="btn btn-outline" data-action="open-register">Sign Up</button>`,
+  );
+}
+
+function peoplePage(): string {
+  if (!state.user) {
+    return signInPrompt("Sign in to find people", "Log in to connect with other members and start chatting.");
+  }
+
+  const { connections, incoming, outgoing } = state.network;
+  const tab = state.peopleTab;
+  const requestCount = incoming.length + outgoing.length;
+
+  const tabButton = (id: typeof tab, label: string, count: number) => `
+    <button class="tab ${tab === id ? "active" : ""}" role="tab" aria-selected="${tab === id}" data-action="people-tab" data-value="${id}">
+      ${label}${count > 0 ? `<span class="tab-count">${count}</span>` : ""}
+    </button>`;
+
+  let body = "";
+  if (tab === "discover") {
+    body = state.people.length
+      ? `<div class="people-grid">${state.people.map(personCard).join("")}</div>`
+      : emptyState(
+          "No members found",
+          state.peopleQuery ? "Try a different name or username." : "Invite friends to join and they will appear here.",
+        );
+  } else if (tab === "requests") {
+    body =
+      requestCount === 0
+        ? emptyState("No pending requests", "When someone asks to connect with you, it will show up here.")
+        : `${
+            incoming.length
+              ? `<h3 class="section-title">Wants to connect with you</h3><div class="people-grid">${incoming.map((r) => personCard(r.person)).join("")}</div>`
+              : ""
+          }${
+            outgoing.length
+              ? `<h3 class="section-title">Waiting for a reply</h3><div class="people-grid">${outgoing.map((r) => personCard(r.person)).join("")}</div>`
+              : ""
+          }`;
+  } else {
+    body = connections.length
+      ? `<div class="people-grid">${connections.map(personCard).join("")}</div>`
+      : emptyState("No connections yet", "Connect with members to start private chats.", `<button class="btn btn-brand" data-action="people-tab" data-value="discover">Discover people</button>`);
+  }
+
+  const main = `
+    <section class="page-hero">
+      <div class="page-hero-copy">
+        <h1>Find your people</h1>
+        <p>Connect with researchers and developers, then chat with them in private.</p>
+      </div>
+      <form class="people-search" data-form="people-search" role="search">
+        ${icon("search")}
+        <input name="q" type="search" autocomplete="off" aria-label="Search people" placeholder="Search by name, username or bio" value="${escapeHTML(state.peopleQuery)}">
+        <button class="btn btn-brand btn-sm" type="submit">Search</button>
+      </form>
+    </section>
+    <div class="tabs" role="tablist">
+      ${tabButton("discover", "Discover", 0)}
+      ${tabButton("requests", "Requests", incoming.length)}
+      ${tabButton("connections", "Connections", connections.length)}
+    </div>
+    ${body}`;
+
+  const rail = `
+    <div class="card network-card">
+      <div class="card-head">Your network</div>
+      <div class="card-body">
+        <div class="stat-row">
+          <div><strong>${formatCount(connections.length)}</strong><small>Connections</small></div>
+          <div><strong>${formatCount(incoming.length)}</strong><small>Requests</small></div>
+        </div>
+        <a class="btn btn-brand btn-block" href="#/messages">${icon("message")} Open messages</a>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">How it works</div>
+      <div class="card-body tips">
+        <p><strong>1.</strong> Press <em>Connect</em> on someone you would like to talk to.</p>
+        <p><strong>2.</strong> When they accept, a private chat opens for both of you.</p>
+        <p><strong>3.</strong> Members you share communities with appear first.</p>
+      </div>
+    </div>`;
+
+  return layout(main, rail);
+}
+
+async function refreshNetwork(): Promise<void> {
+  const route = state.route;
+
+  if (route.name === "messages") {
+    await navigate({ keepScroll: true });
+    return;
+  }
+
+  state.network = await api<ConnectionsData>("/api/connections/");
+
+  if (route.name === "people") {
+    const search = state.peopleQuery ? `?search=${encodeURIComponent(state.peopleQuery)}` : "";
+    state.people = await api<Person[]>(`/api/people/${search}`);
+  }
+  if (route.name === "user") {
+    state.profile = await api<Person>(`/api/people/${encodeURIComponent(route.username)}/`);
+  }
+
+  renderPage();
+  void refreshSummary();
+}
+
+async function connectionAction(path: string, init: RequestInit, message: string): Promise<void> {
+  if (!state.user) {
+    authModal("login");
+    return;
+  }
+  await api(path, init);
+  toast(message);
+  await refreshNetwork();
+}
+
+/* -------------------------------- chat ---------------------------------- */
+
+function lastChatId(): number {
+  const list = state.chat?.messages;
+  return list && list.length ? list[list.length - 1].id : 0;
+}
+
+function scrollChat(force = false): void {
+  const log = document.querySelector<HTMLElement>("#chat-log");
+  if (!log) return;
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 140;
+  if (force || nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+function bubbleHTML(message: ChatMessage, chat: ChatData): string {
+  const mine = message.sender === state.user?.id;
+  const seen = mine && message.id <= chat.seen_up_to;
+  const tick = mine
+    ? `<span class="tick ${seen ? "seen" : ""}" aria-label="${seen ? "Seen" : "Sent"}">${icon("check", "inline")}</span>`
+    : "";
+  return `<div class="bubble-row ${mine ? "mine" : "theirs"}" data-msg="${message.id}"><div class="bubble">${escapeHTML(message.body)}<span class="bubble-meta">${escapeHTML(chatTime(message.created_at))}${tick}</span></div></div>`;
+}
+
+function dayDivider(date: string): string {
+  return `<div class="day-divider"><span>${escapeHTML(dayLabel(date))}</span></div>`;
+}
+
+function chatLogHTML(chat: ChatData): string {
+  if (!chat.messages.length) {
+    return `<div class="chat-hint">${icon("sparkle")}<p>This is the start of your conversation with ${escapeHTML(chat.person.display_name)}. Say hello!</p></div>`;
+  }
+
+  let html = "";
+  let lastDay = "";
+  for (const message of chat.messages) {
+    const day = dayLabel(message.created_at);
+    if (day !== lastDay) {
+      html += dayDivider(message.created_at);
+      lastDay = day;
+    }
+    html += bubbleHTML(message, chat);
+  }
+  return html;
+}
+
+function appendMessages(list: ChatMessage[], forceScroll = false): void {
+  const chat = state.chat;
+  const log = document.querySelector<HTMLElement>("#chat-log");
+  if (!chat || !log || !list.length) return;
+
+  const known = new Set(chat.messages.map((message) => message.id));
+  const fresh = list.filter((message) => !known.has(message.id));
+  if (!fresh.length) return;
+
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 140;
+  log.querySelector(".chat-hint")?.remove();
+
+  for (const message of fresh) {
+    const previous = chat.messages[chat.messages.length - 1];
+    if (!previous || dayLabel(previous.created_at) !== dayLabel(message.created_at)) {
+      log.insertAdjacentHTML("beforeend", dayDivider(message.created_at));
+    }
+    chat.messages.push(message);
+    log.insertAdjacentHTML("beforeend", bubbleHTML(message, chat));
+  }
+
+  if (forceScroll || nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+function markSeen(): void {
+  const chat = state.chat;
+  if (!chat) return;
+  document.querySelectorAll<HTMLElement>(".bubble-row.mine").forEach((row) => {
+    if (Number(row.dataset.msg) <= chat.seen_up_to) row.querySelector(".tick")?.classList.add("seen");
+  });
+}
+
+function convoListHTML(): string {
+  const route = state.route;
+  const active = route.name === "messages" ? route.username?.toLowerCase() : undefined;
+  const me = state.user?.id;
+
+  const items = state.conversations
+    .map((conversation) => {
+      const person = conversation.person;
+      const isActive = active === person.username.toLowerCase();
+      const unread = isActive ? 0 : conversation.unread;
+      const mine = conversation.last_message.sender === me;
+      return `
+        <a class="convo ${isActive ? "active" : ""}" href="#/messages/${encodeURIComponent(person.username)}">
+          ${userAvatar(person.display_name, "md", person.avatar_url)}
+          <span class="convo-text">
+            <strong>${escapeHTML(person.display_name)}</strong>
+            <small>${mine ? "You: " : ""}${escapeHTML(conversation.last_message.body)}</small>
+          </span>
+          <span class="convo-meta">
+            <time>${escapeHTML(timeAgo(conversation.last_message.created_at))}</time>
+            ${unread ? `<span class="badge-dot static">${unread}</span>` : ""}
+          </span>
+        </a>`;
+    })
+    .join("");
+
+  const talking = new Set(state.conversations.map((conversation) => conversation.person.id));
+  const fresh = state.network.connections.filter((person) => !talking.has(person.id));
+  const starters = fresh.length
+    ? `<div class="convo-label">Start a chat</div>${fresh
+        .map(
+          (person) => `
+        <a class="convo ${active === person.username.toLowerCase() ? "active" : ""}" href="#/messages/${encodeURIComponent(person.username)}">
+          ${userAvatar(person.display_name, "md", person.avatar_url)}
+          <span class="convo-text"><strong>${escapeHTML(person.display_name)}</strong><small>Say hello</small></span>
+        </a>`,
+        )
+        .join("")}`
+    : "";
+
+  if (!items && !starters) {
+    return `<div class="convo-empty"><p>No conversations yet.</p><a class="btn btn-brand btn-sm" href="#/people">${icon("userPlus")} Find people</a></div>`;
+  }
+  return `${items}${starters}`;
+}
+
+async function refreshConversations(): Promise<void> {
+  try {
+    state.conversations = await api<Conversation[]>("/api/messages/");
+    const target = document.querySelector<HTMLElement>("#convo-items");
+    if (target && state.route.name === "messages") target.innerHTML = convoListHTML();
+  } catch {
+    
+  }
+}
+
+function chatPaneHTML(chat: ChatData): string {
+  const person = chat.person;
+  const composer = chat.can_message
+    ? `
+      <form class="composer" data-form="chat-send">
+        <textarea name="body" rows="1" maxlength="2000" placeholder="Write a message…" aria-label="Message" data-chat-input autocomplete="off"></textarea>
+        <button class="send-btn" type="submit" aria-label="Send message">${icon("send")}</button>
+      </form>`
+    : `
+      <div class="chat-locked">
+        ${icon("lock")}
+        <p>You need to be connected with ${escapeHTML(person.display_name)} to chat.</p>
+        ${
+          person.connection_status === "none"
+            ? `<button class="btn btn-brand btn-sm" data-action="connect" data-id="${person.id}">${icon("userPlus")} Connect</button>`
+            : person.connection_status === "pending_received"
+              ? `<button class="btn btn-brand btn-sm" data-action="accept-request" data-id="${person.connection_id}">${icon("check")} Accept request</button>`
+              : `<span class="muted">Request sent — waiting for a reply.</span>`
+        }
+      </div>`;
+
+  return `
+    <header class="chat-head">
+      <a class="icon-btn chat-back" href="#/messages" aria-label="Back to conversations">${icon("chevron", "back")}</a>
+      <a class="chat-who" href="#/u/${encodeURIComponent(person.username)}">
+        ${userAvatar(person.display_name, "md", person.avatar_url)}
+        <span><strong>${escapeHTML(person.display_name)}</strong><small class="muted">${USER_PREFIX}${escapeHTML(person.username)}</small></span>
+      </a>
+      <button class="icon-btn" data-action="toggle-sound" aria-label="${soundOn ? "Mute message sounds" : "Turn on message sounds"}" title="Message sounds">${icon(soundOn ? "volume" : "volumeOff")}</button>
+    </header>
+    <div class="chat-log" id="chat-log" role="log" aria-live="polite" aria-label="Conversation with ${escapeHTML(person.display_name)}">${chatLogHTML(chat)}</div>
+    ${composer}`;
+}
+
+function messagesPage(): string {
+  if (!state.user) {
+    return signInPrompt("Sign in to chat", "Log in to message the people you are connected with.");
+  }
+
+  const pane = state.chat
+    ? chatPaneHTML(state.chat)
+    : `
+      <div class="chat-empty">
+        <span class="chat-empty-art">${icon("message")}</span>
+        <h3>Your messages</h3>
+        <p>Pick a conversation, or start a new one with someone you are connected with.</p>
+        <a class="btn btn-brand" href="#/people">${icon("users")} Find people</a>
+      </div>`;
+
+  return `
+    <div class="messages-shell ${state.chat ? "has-chat" : ""}">
+      <aside class="convo-list" aria-label="Conversations">
+        <div class="convo-head">
+          <h2>Messages</h2>
+          <button class="icon-btn" data-action="toggle-sound" aria-label="${soundOn ? "Mute message sounds" : "Turn on message sounds"}" title="Message sounds">${icon(soundOn ? "volume" : "volumeOff")}</button>
+        </div>
+        <div id="convo-items" class="convo-items">${convoListHTML()}</div>
+      </aside>
+      <section class="chat-pane" aria-label="Chat">${pane}</section>
+    </div>`;
+}
+
+async function sendChat(form: HTMLFormElement): Promise<void> {
+  const chat = state.chat;
+  if (!chat) return;
+
+  const input = form.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  if (!input) return;
+  const body = input.value.trim();
+  if (!body) return;
+
+  input.value = "";
+  input.style.height = "";
+
+  try {
+    const message = await api<ChatMessage>(`/api/messages/with/${encodeURIComponent(chat.person.username)}/`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
+    appendMessages([message], true);
+    void refreshConversations();
+  } catch (error) {
+    input.value = body;
+    toast(errorMessage(error), "error");
+  }
+  input.focus();
+}
+
+async function pollChat(): Promise<void> {
+  const route = state.route;
+  const chat = state.chat;
+  if (route.name !== "messages" || !route.username || !chat || !state.user) return;
+
+  const username = route.username;
+  try {
+    const data = await api<ChatData>(`/api/messages/with/${encodeURIComponent(username)}/?after=${lastChatId()}`);
+    const current = state.route;
+    if (current.name !== "messages" || current.username !== username || state.chat !== chat) return;
+
+    const received = data.messages.filter((message) => message.sender !== state.user?.id);
+    appendMessages(data.messages);
+    chat.seen_up_to = data.seen_up_to;
+    chat.can_message = data.can_message;
+    markSeen();
+
+    if (received.length) {
+      playPing();
+      void refreshConversations();
+      void refreshSummary();
+    }
+  } catch {
+    
+  }
+}
+
+function stopChatPolling(): void {
+  if (chatTimer) {
+    window.clearInterval(chatTimer);
+    chatTimer = 0;
+  }
+}
+
+function startChatPolling(): void {
+  stopChatPolling();
+  chatTimer = window.setInterval(() => {
+    if (!document.hidden) void pollChat();
+  }, 2500);
+}
+
+
+function heroCard(): string {
+  const user = state.user;
+  const site = escapeHTML(state.branding.site_name);
+  const actions = user
+    ? `<a class="btn btn-glass" href="#/people">${icon("userPlus")} Find people</a>
+       <a class="btn btn-glass ghost" href="#/messages">${icon("message")} Messages ${badge(state.summary.unread_messages, "messages")}</a>`
+    : `<button class="btn btn-glass" data-action="open-register">Join ${site}</button>
+       <button class="btn btn-glass ghost" data-action="open-login">Log In</button>`;
+
+  return `
+    <section class="hero">
+      <span class="hero-orb o1"></span><span class="hero-orb o2"></span><span class="hero-orb o3"></span>
+      <div class="hero-copy">
+        <span class="hero-eyebrow">${icon("sparkle")} ${escapeHTML(state.branding.tagline)}</span>
+        <h1>${user ? `Welcome back, ${escapeHTML(userName(user))}` : "Where researchers and builders connect"}</h1>
+        <p>${
+          user
+            ? "Catch up with your communities, meet new people and keep the conversation going in private chat."
+            : "Join communities, share your work, make connections and chat with the people behind the posts."
+        }</p>
+        <div class="hero-actions">${actions}</div>
+      </div>
+    </section>`;
+}
+
+
 
 function modalRoot(): HTMLElement {
   return document.querySelector<HTMLElement>("#modal-root")!;
@@ -1764,6 +2404,16 @@ async function handleSubmit(form: HTMLFormElement): Promise<void> {
       break;
     }
 
+    case "people-search":
+      state.peopleQuery = String(new FormData(form).get("q") || "").trim();
+      state.peopleTab = "discover";
+      await navigate({ keepScroll: true });
+      break;
+
+    case "chat-send":
+      await sendChat(form);
+      break;
+
     case "auth":
       await withBusy(form, async () => {
         const mode = form.dataset.mode === "register" ? "register" : "login";
@@ -1924,13 +2574,16 @@ async function handleAction(element: HTMLElement, event: Event): Promise<void> {
     case "logout":
       await api("/api/auth/logout/", { method: "POST" });
       state.user = null;
+      state.summary = { unread_messages: 0, pending_requests: 0, latest: null };
+      lastAlertId = 0;
+      stopChatPolling();
       await loadCommunities();
       renderNav();
       await navigate();
       toast("You have been logged out.");
       break;
     case "close-modal":
-      /* clicking the dark backdrop closes, clicking inside the dialog does not */
+      
       if (element.classList.contains("modal-backdrop") && event.target !== element) break;
       closeModal();
       break;
@@ -1998,6 +2651,41 @@ async function handleAction(element: HTMLElement, event: Event): Promise<void> {
     case "retry":
       await navigate({ keepScroll: true });
       break;
+    case "connect":
+      await connectionAction("/api/connections/", { method: "POST", body: JSON.stringify({ user_id: id }) }, "Connection request sent.");
+      break;
+    case "cancel-request":
+      await connectionAction(`/api/connections/${id}/`, { method: "DELETE" }, "Request cancelled.");
+      break;
+    case "accept-request":
+      await connectionAction(`/api/connections/${id}/respond/`, { method: "POST", body: JSON.stringify({ action: "accept" }) }, "You are now connected.");
+      break;
+    case "decline-request":
+      await connectionAction(`/api/connections/${id}/respond/`, { method: "POST", body: JSON.stringify({ action: "decline" }) }, "Request declined.");
+      break;
+    case "disconnect":
+      if (window.confirm("Remove this connection? You will no longer be able to message each other.")) {
+        await connectionAction(`/api/connections/${id}/`, { method: "DELETE" }, "Connection removed.");
+      }
+      break;
+    case "people-tab":
+      state.peopleTab = (element.dataset.value as typeof state.peopleTab) || "discover";
+      renderPage();
+      break;
+    case "toggle-sound":
+      soundOn = !soundOn;
+      try {
+        localStorage.setItem("onconnect-sound", soundOn ? "on" : "off");
+      } catch {
+      
+      }
+      document.querySelectorAll<HTMLElement>('[data-action="toggle-sound"]').forEach((button) => {
+        button.innerHTML = icon(soundOn ? "volume" : "volumeOff");
+        button.setAttribute("aria-label", soundOn ? "Mute message sounds" : "Turn on message sounds");
+      });
+      if (soundOn) playPing();
+      toast(soundOn ? "Message sounds are on." : "Message sounds are off.");
+      break;
   }
 }
 
@@ -2009,7 +2697,7 @@ function setupEvents(): void {
     if (!target.closest(".menu-wrap")) closeMenus();
 
     let actionEl = target.closest<HTMLElement>("[data-action]");
-    /* the dark backdrop only reacts to clicks on itself, never to clicks inside the dialog */
+   
     if (actionEl?.classList.contains("modal-backdrop") && target !== actionEl) actionEl = null;
     if (actionEl) {
       event.preventDefault();
@@ -2017,7 +2705,7 @@ function setupEvents(): void {
       return;
     }
 
-    /* clicking a link to the page you are already on refreshes it */
+   
     const anchor = target.closest<HTMLAnchorElement>('a[href^="#/"]');
     if (anchor && anchor.getAttribute("href") === window.location.hash) {
       event.preventDefault();
@@ -2025,7 +2713,7 @@ function setupEvents(): void {
       return;
     }
 
-    /* the whole post card is clickable in feeds */
+    
     const card = target.closest<HTMLElement>(".post-clickable");
     if (card && !target.closest("a, button, input, textarea, select, label, form")) {
       const href = card.dataset.href;
@@ -2068,6 +2756,12 @@ function setupEvents(): void {
 
   document.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
+
+    if (input instanceof HTMLTextAreaElement && input.hasAttribute("data-chat-input")) {
+      input.style.height = "auto";
+      input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+    }
+
     if (input.name === "title" && input.closest('form[data-form="submit"]')) {
       const counter = document.querySelector<HTMLElement>("#title-count");
       if (counter) counter.textContent = `${input.value.length}/180`;
@@ -2075,6 +2769,19 @@ function setupEvents(): void {
   });
 
   document.addEventListener("keydown", (event) => {
+    const field = event.target;
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.isComposing &&
+      field instanceof HTMLTextAreaElement &&
+      field.hasAttribute("data-chat-input")
+    ) {
+      event.preventDefault();
+      field.form?.requestSubmit();
+      return;
+    }
+
     if (event.key === "Escape") {
       closeMenus();
       document.body.classList.remove("drawer-open");
@@ -2113,6 +2820,11 @@ async function boot(): Promise<void> {
   await loadCommunities();
 
   await navigate({ keepScroll: true });
+
+
+  window.setInterval(() => {
+    if (!document.hidden) void refreshSummary();
+  }, 6000);
 }
 
 boot();

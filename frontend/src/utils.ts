@@ -78,6 +78,55 @@ export type Branding = {
 
 export type Sort = "hot" | "new" | "top";
 
+/* --------------------------- People and chat --------------------------- */
+
+export type ConnectionStatus = "self" | "none" | "pending_sent" | "pending_received" | "connected";
+
+export type Person = {
+  id: number;
+  username: string;
+  display_name: string;
+  bio?: string;
+  avatar_url?: string;
+  connection_status: ConnectionStatus;
+  connection_id: number | null;
+  shared_communities: number;
+  connection_count?: number;
+  date_joined?: string;
+};
+
+export type ConnectionRequest = { id: number; person: Person; created_at: string };
+
+export type ConnectionsData = {
+  connections: Person[];
+  incoming: ConnectionRequest[];
+  outgoing: ConnectionRequest[];
+};
+
+export type ChatMessage = {
+  id: number;
+  sender: number;
+  recipient: number;
+  body: string;
+  created_at: string;
+  read: boolean;
+};
+
+export type Conversation = { person: Person; last_message: ChatMessage; unread: number };
+
+export type ChatData = {
+  person: Person;
+  messages: ChatMessage[];
+  can_message: boolean;
+  seen_up_to: number;
+};
+
+export type Summary = {
+  unread_messages: number;
+  pending_requests: number;
+  latest: { id: number; username: string; display_name: string; preview: string } | null;
+};
+
 export type Route =
   | { name: "home" }
   | { name: "popular" }
@@ -88,6 +137,8 @@ export type Route =
   | { name: "search"; q: string }
   | { name: "user"; username: string }
   | { name: "settings" }
+  | { name: "people" }
+  | { name: "messages"; username?: string }
   | { name: "notfound" };
 
 /* ------------------------------ Routing ----------------------------- */
@@ -116,6 +167,10 @@ export function parseRoute(hash: string): Route {
       return { name: "communities" };
     case "settings":
       return { name: "settings" };
+    case "people":
+      return { name: "people" };
+    case "messages":
+      return second ? { name: "messages", username: second } : { name: "messages" };
     case "c":
       return second ? { name: "community", slug: second } : { name: "communities" };
     case "u":
@@ -266,4 +321,27 @@ export function buildCommentTree(items: Comment[]): CommentNode[] {
 
 export function countDescendants(node: CommentNode): number {
   return node.children.reduce((sum, child) => sum + 1 + countDescendants(child), 0);
+}
+
+
+/* ------------------------------- Chat helpers ------------------------------ */
+
+/** "14:05" for today's messages, "Mar 3, 14:05" for older ones. */
+export function chatTime(date: string, now: Date = new Date()): string {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
+/** Label for the divider between days in a conversation: Today, Yesterday or a date. */
+export function dayLabel(date: string, now: Date = new Date()): string {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return "";
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(now) - startOf(d)) / 86_400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }

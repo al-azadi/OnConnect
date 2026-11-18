@@ -20,6 +20,7 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/communities/", include("communities.urls")),
     path("api/", include("social.urls")),
+    path("api/", include("connections.urls")),
 ]
 
 if settings.DEBUG:

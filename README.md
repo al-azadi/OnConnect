@@ -75,7 +75,7 @@ If the plan is expected:
 ```powershell
 python backend\manage.py migrate
 python backend\manage.py createsuperuser
-python backend\manage.py runserver 127.0.0.1:7000
+python backend\manage.py runserver 127.0.0.1:8000
 ```
 
 ## 5. Start the frontend (second PowerShell terminal)
@@ -87,8 +87,8 @@ npm run dev
 Open the Vite URL printed in the terminal, usually http://127.0.0.1:5173.
 
 ## 6. Verify
-- API health: http://127.0.0.1:7000/api/health/
-- Django admin: http://127.0.0.1:7000/admin/
+- API health: http://127.0.0.1:8000/api/health/
+- Django admin: http://127.0.0.1:8000/admin/
 - Frontend: http://127.0.0.1:5173/
 
 The frontend proxies `/api` and `/admin` to Django. Session authentication and
@@ -107,7 +107,7 @@ posts, chats, project publishing and research publishing are planned for later
 stages.
 
 ---
- 
+
 ## Reddit-style frontend
 
 The frontend (`frontend/src`) has been redesigned as a Reddit-style site:
@@ -136,22 +136,56 @@ search, profiles, light/dark theme and a mobile drawer.
 - Backend additions: `PATCH /api/auth/me/` and an `author_avatar` field on
   posts and comments. No database migration is required.
 
-## Professional frontend refresh
+---
 
-The frontend styling has received a visual refresh while retaining the existing
-TypeScript application, Django API calls, routes, authentication, community and
-post interactions, appearance preferences, and profile editing flow. The update
-adds a more spacious dashboard, refined navigation and cards, a violet/indigo
-brand palette, improved typography, softer surfaces, responsive spacing, and
-clearer hover/focus states. No database schema or API changes are required.
+## Upgrade: people, private chat and the Aurora look
 
-After replacing the project files, install frontend dependencies and build:
+### What is new
+
+**Connections**
+- A **People** page (`#/people`) with Discover, Requests and Connections tabs and a search box.
+- Members you share communities with are listed first.
+- Press **Connect** to send a request. If the other person already asked you, pressing it simply accepts theirs.
+- Accept, decline, cancel a request, or remove a connection.
+- Profile pages now show a bio, shared communities, a connection count and the right buttons (Connect, Accept, Message).
+
+**Private chat**
+- A **Messages** page (`#/messages` and `#/messages/<username>`) with a conversation list and a chat window.
+- Only connected members can message each other (enforced on the server).
+- New messages appear automatically (the browser checks every 2.5 seconds), with day dividers, sent and seen ticks, Enter to send and Shift+Enter for a new line.
+- Unread badges on the top bar and the side menu, a pop-up when a message arrives on another page, and a short chime that you can mute (the speaker icon).
+
+**Design**
+- New gradient "Aurora" theme in `frontend/src/upgrade.css`: glass top bar, animated welcome banner, lifted cards, gradient buttons, avatar rings and smooth motion.
+- Works in light and dark mode and follows the accent colour chosen in the Appearance panel.
+- Respects the "reduce motion" setting of the operating system.
+
+### New back-end app: `backend/connections`
+
+| Route | Purpose |
+|---|---|
+| `GET /api/people/?search=` | Members with their connection status and shared communities |
+| `GET /api/people/<username>/` | One member, with connection count |
+| `GET, POST /api/connections/` | List connections and requests; send or auto-accept a request |
+| `POST /api/connections/<id>/respond/` | Accept or decline (`{"action": "accept"}`) |
+| `DELETE /api/connections/<id>/` | Cancel a request or remove a connection |
+| `GET /api/messages/` | Conversations with last message and unread count |
+| `GET, POST /api/messages/with/<username>/` | Read (`?after=<id>` for new only) or send a message |
+| `GET /api/notifications/summary/` | Unread messages and pending requests (used for badges) |
+
+### After pulling this upgrade
 
 ```powershell
-cd frontend
-npm ci
-npm run build
+pip install -r backend\requirements.txt
+python backend\manage.py migrate          # creates the two new tables
+python backend\manage.py test connections # optional: run the new tests
 ```
 
-Then use the existing Django and Vite startup instructions above. The frontend
-continues to use the same API proxy and environment configuration.
+The front end needs no new packages. Create two accounts, connect them in the People page, and open Messages in two browsers to try the chat.
+
+### Other fixes included
+- `vite.config.ts` now proxies to port 8000 (as in this README). Set `VITE_API_TARGET` to use another port.
+- The unused Django scaffold files at the project root, a stray SQLite file and `backend/.env` were removed. Copy `backend/.env.example` to `backend/.env` and fill in your own values.
+
+### Ideas for next steps
+Group chats, image and voice messages, typing indicators with WebSockets (Django Channels), and email or browser notifications.
